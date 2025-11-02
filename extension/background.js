@@ -3,11 +3,13 @@ import {
   SUCCESS_LINK_URL,
   FAILURE_LINK_URL,
   REQUEST_TIMEOUT_MS,
+  CONTEXT_MENU_TITLE,
 } from "./config.js";
 
 const MENU_ID = "send-to-chatgpt-proxy";
 const notificationLinks = new Map();
 const manifest = chrome.runtime.getManifest();
+const menuTitle = CONTEXT_MENU_TITLE?.trim() || "Send to ChatGPT (via Proxy)";
 
 chrome.runtime.onInstalled.addListener(async () => {
   await createOrUpdateContextMenu();
@@ -58,7 +60,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!selection) {
     await showNotification({
       title: "Nothing to send",
-      message: "Select some text before using “Send to ChatGPT (via Proxy)”.",
+      message: `Select some text before using “${menuTitle}”.`,
       isError: true,
       targetUrl: FAILURE_LINK_URL,
     });
@@ -98,7 +100,7 @@ async function createOrUpdateContextMenu() {
 
   chrome.contextMenus.create({
     id: MENU_ID,
-    title: "Send to ChatGPT (via Proxy)",
+    title: menuTitle,
     contexts: ["selection"],
   });
 }

@@ -4,7 +4,7 @@ Chrome context-menu helper that forwards highlighted text and page metadata to a
 
 ## Quick Start
 1. Configure endpoints  
-   Edit `extension/config.js` with your proxy URL and the links you want opened after success/failure. Adjust the timeout if needed.
+   Edit `extension/config.js` with your proxy URL, the follow-up links, and your preferred context menu label. Adjust the timeout if needed.
 2. (Optional) Narrow permissions  
    Replace `<all_urls>` in `extension/manifest.json` `host_permissions` with your proxy origin, e.g. `"https://proxy.example.com/*"`.
 3. Load the unpacked extension  
@@ -43,5 +43,5 @@ Chrome context-menu helper that forwards highlighted text and page metadata to a
 
 ## Files Worth Knowing
 - `extension/background.js`: Manifest V3 service worker with context menu, metadata capture, fetch, and notifications.
-- `extension/config.js`: Proxy and notification link configuration.
+- `extension/config.js`: Proxy, notification links, context menu label, timeout.
 - `extension/icons/`: Simple placeholder PNGs.
