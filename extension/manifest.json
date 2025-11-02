@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Send to ChatGPT (via Proxy)",
+  "version": "0.1.0",
+  "description": "Send selected text and page metadata to a ChatGPT proxy endpoint from the context menu.",
+  "permissions": [
+    "contextMenus",
+    "notifications",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}
