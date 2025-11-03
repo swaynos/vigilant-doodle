@@ -45,6 +45,12 @@ chrome.notifications.onClosed.addListener((notificationId) => {
   notificationLinks.delete(notificationId);
 });
 
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "send-to-chatgpt:open-link" && message.url) {
+    openUrlInNewTab(message.url);
+  }
+});
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== MENU_ID) {
     return;
@@ -59,6 +65,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       message: configError,
       isError: true,
       targetUrl: FAILURE_LINK_URL,
+      tabId: tab?.id,
     });
     return;
   }
@@ -70,6 +77,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       message: `Select some text before using "${menuTitle}".`,
       isError: true,
       targetUrl: FAILURE_LINK_URL,
+      tabId: tab?.id,
     });
     return;
   }
@@ -85,6 +93,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       message: notificationMessage,
       isError: false,
       targetUrl: SUCCESS_LINK_URL,
+      tabId: tab?.id,
     });
   } catch (error) {
     await showNotification({
@@ -92,6 +101,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       message: error?.message || "Unknown error while contacting OpenAI.",
       isError: true,
       targetUrl: FAILURE_LINK_URL,
+      tabId: tab?.id,
     });
   }
 });
@@ -389,7 +399,27 @@ function fallbackMetadata(tab) {
   };
 }
 
-async function showNotification({ title, message, isError, targetUrl }) {
+async function showNotification({ title, message, isError, targetUrl, tabId }) {
+  if (tabId) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: injectToastIntoPage,
+        args: [
+          {
+            title: title || "",
+            message: message || "",
+            isError: Boolean(isError),
+            targetUrl: targetUrl || null,
+          },
+        ],
+      });
+      return;
+    } catch (error) {
+      console.warn("Falling back to chrome.notifications API.", error);
+    }
+  }
+
   const notificationId = createNotificationId();
   const options = {
     type: "basic",
@@ -409,6 +439,235 @@ async function showNotification({ title, message, isError, targetUrl }) {
   }
 
   await chrome.notifications.create(notificationId, options);
+}
+
+function injectToastIntoPage({ title, message, isError, targetUrl }) {
+  try {
+    const containerId = "send-to-chatgpt-toast-container";
+    const styleId = "send-to-chatgpt-toast-styles";
+    const displayDurationMs = 8000;
+    const fadeDurationMs = 200;
+
+    ensureStyles();
+    const container = ensureContainer();
+    const toast = document.createElement("div");
+    toast.className = "send-to-chatgpt-toast";
+    toast.setAttribute("role", "alert");
+    toast.setAttribute("aria-live", isError ? "assertive" : "polite");
+
+    if (isError) {
+      toast.classList.add("send-to-chatgpt-toast--error");
+    }
+
+    if (title) {
+      const titleEl = document.createElement("div");
+      titleEl.className = "send-to-chatgpt-toast__title";
+      titleEl.textContent = title;
+      toast.appendChild(titleEl);
+    }
+
+    if (message) {
+      const messageEl = document.createElement("p");
+      messageEl.className = "send-to-chatgpt-toast__message";
+      messageEl.textContent = message;
+      toast.appendChild(messageEl);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "send-to-chatgpt-toast__actions";
+
+    if (targetUrl) {
+      const openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.className = "send-to-chatgpt-toast__button";
+      openButton.textContent = "Open link";
+      openButton.addEventListener("click", () => {
+        chrome.runtime.sendMessage({
+          type: "send-to-chatgpt:open-link",
+          url: targetUrl,
+        });
+        dismiss();
+      });
+      actions.appendChild(openButton);
+    }
+
+    const dismissButton = document.createElement("button");
+    dismissButton.type = "button";
+    dismissButton.className =
+      "send-to-chatgpt-toast__button send-to-chatgpt-toast__button--tertiary";
+    dismissButton.textContent = "Dismiss";
+    dismissButton.addEventListener("click", () => {
+      dismiss();
+    });
+    actions.appendChild(dismissButton);
+
+    toast.appendChild(actions);
+    container.appendChild(toast);
+
+    requestAnimationFrame(() => {
+      toast.classList.add("send-to-chatgpt-toast--visible");
+    });
+
+    let autoRemoveTimer = window.setTimeout(() => {
+      dismiss();
+    }, displayDurationMs);
+
+    const cancelAutoRemove = () => {
+      if (!autoRemoveTimer) {
+        return;
+      }
+      window.clearTimeout(autoRemoveTimer);
+      autoRemoveTimer = null;
+    };
+
+    toast.addEventListener("mouseenter", cancelAutoRemove);
+    toast.addEventListener("focusin", cancelAutoRemove);
+
+    toast.addEventListener("mouseleave", () => {
+      if (autoRemoveTimer) {
+        return;
+      }
+      autoRemoveTimer = window.setTimeout(() => {
+        dismiss();
+      }, displayDurationMs / 2);
+    });
+
+    toast.addEventListener("focusout", () => {
+      if (autoRemoveTimer) {
+        return;
+      }
+      autoRemoveTimer = window.setTimeout(() => {
+        dismiss();
+      }, displayDurationMs / 2);
+    });
+
+    function dismiss() {
+      if (toast.dataset.dismissed === "1") {
+        return;
+      }
+      toast.dataset.dismissed = "1";
+      cancelAutoRemove();
+      toast.classList.add("send-to-chatgpt-toast--leaving");
+      window.setTimeout(() => {
+        toast.remove();
+        if (!container.children.length) {
+          container.remove();
+        }
+      }, fadeDurationMs);
+    }
+
+    function ensureContainer() {
+      let element = document.getElementById(containerId);
+      if (element) {
+        return element;
+      }
+      element = document.createElement("div");
+      element.id = containerId;
+      element.setAttribute("aria-live", "polite");
+      element.setAttribute("aria-atomic", "false");
+      element.style.position = "fixed";
+      element.style.top = "16px";
+      element.style.right = "16px";
+      element.style.display = "flex";
+      element.style.flexDirection = "column";
+      element.style.gap = "12px";
+      element.style.zIndex = "2147483647";
+      element.style.pointerEvents = "none";
+      (document.body || document.documentElement).appendChild(element);
+      return element;
+    }
+
+    function ensureStyles() {
+      if (document.getElementById(styleId)) {
+        return;
+      }
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = `
+        #${containerId} {
+          position: fixed;
+          top: 16px;
+          right: 16px;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+          z-index: 2147483647;
+          pointer-events: none;
+        }
+        .send-to-chatgpt-toast {
+          position: relative;
+          min-width: 240px;
+          max-width: min(360px, 90vw);
+          background: #111827;
+          color: #f9fafb;
+          border-radius: 8px;
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          box-shadow: 0 20px 40px rgba(15, 23, 42, 0.3);
+          padding: 16px;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+          font-size: 14px;
+          line-height: 1.4;
+          opacity: 0;
+          transform: translateY(-10px);
+          transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+          pointer-events: auto;
+        }
+        .send-to-chatgpt-toast--visible {
+          opacity: 1;
+          transform: translateY(0);
+        }
+        .send-to-chatgpt-toast--leaving {
+          opacity: 0;
+          transform: translateY(-6px);
+        }
+        .send-to-chatgpt-toast--error {
+          background: #4b1d1d;
+          border-color: rgba(252, 165, 165, 0.6);
+        }
+        .send-to-chatgpt-toast__title {
+          margin: 0 0 6px 0;
+          font-weight: 600;
+        }
+        .send-to-chatgpt-toast__message {
+          margin: 0;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+        .send-to-chatgpt-toast__actions {
+          margin-top: 14px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .send-to-chatgpt-toast__button {
+          cursor: pointer;
+          border-radius: 6px;
+          border: none;
+          padding: 6px 12px;
+          font-size: 13px;
+          font-weight: 500;
+          background: #2563eb;
+          color: #ffffff;
+        }
+        .send-to-chatgpt-toast__button:focus {
+          outline: 2px solid rgba(37, 99, 235, 0.35);
+          outline-offset: 2px;
+        }
+        .send-to-chatgpt-toast__button--tertiary {
+          background: transparent;
+          color: inherit;
+          border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .send-to-chatgpt-toast__button--tertiary:focus {
+          outline: 2px solid rgba(148, 163, 184, 0.4);
+          outline-offset: 2px;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(style);
+    }
+  } catch (error) {
+    console.error("Failed to inject toast notification.", error);
+  }
 }
 
 function openUrlInNewTab(url) {
