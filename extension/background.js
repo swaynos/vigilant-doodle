@@ -46,6 +46,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
 
+  debugger; // Force a breakpoint if the debugger is active
+
   if (!PROXY_ENDPOINT || PROXY_ENDPOINT.includes("your-proxy.example.com")) {
     await showNotification({
       title: "Proxy endpoint missing",
@@ -71,7 +73,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const payload = buildPayload(selection, metadata);
 
   try {
+    console.log("here");
     const response = await postWithTimeout(PROXY_ENDPOINT, payload, REQUEST_TIMEOUT_MS);
+
     if (!response.ok) {
       throw new Error(`Proxy responded with ${response.status}`);
     }
