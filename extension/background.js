@@ -1,15 +1,19 @@
-import {
-  PROXY_ENDPOINT,
-  SUCCESS_LINK_URL,
-  FAILURE_LINK_URL,
-  REQUEST_TIMEOUT_MS,
-  CONTEXT_MENU_TITLE,
-} from "./config.js";
+import { OPENAI_BASE_URL } from "./config.js";
 
-const MENU_ID = "send-to-chatgpt-proxy";
+// Testing-only credentials and behavior. Replace with secure storage before shipping.
+const OPENAI_API_KEY = "sk-your-api-key";
+const OPENAI_ASSISTANT_ID = "asst_yourAssistantId";
+const SUCCESS_LINK_URL = "https://platform.openai.com/";
+const FAILURE_LINK_URL = "https://help.openai.com/";
+const CONTEXT_MENU_TITLE = "Send to ChatGPT (Assistants API)";
+const REQUEST_TIMEOUT_MS = 20000;
+const RUN_POLL_INTERVAL_MS = 1000;
+const RUN_POLL_TIMEOUT_MS = 60000;
+
+const MENU_ID = "send-to-chatgpt-assistants";
 const notificationLinks = new Map();
 const manifest = chrome.runtime.getManifest();
-const menuTitle = CONTEXT_MENU_TITLE?.trim() || "Send to ChatGPT (via Proxy)";
+const menuTitle = CONTEXT_MENU_TITLE?.trim() || "Send to ChatGPT (Assistants API)";
 
 chrome.runtime.onInstalled.addListener(async () => {
   await createOrUpdateContextMenu();
@@ -48,10 +52,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
   debugger; // Force a breakpoint if the debugger is active
 
-  if (!PROXY_ENDPOINT || PROXY_ENDPOINT.includes("your-proxy.example.com")) {
+  const configError = validateAssistantsConfiguration();
+  if (configError) {
     await showNotification({
-      title: "Proxy endpoint missing",
-      message: "Update extension/config.js with your proxy endpoint before sending.",
+      title: "Assistants API not configured",
+      message: configError,
       isError: true,
       targetUrl: FAILURE_LINK_URL,
     });
@@ -62,7 +67,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!selection) {
     await showNotification({
       title: "Nothing to send",
-      message: `Select some text before using “${menuTitle}”.`,
+      message: `Select some text before using "${menuTitle}".`,
       isError: true,
       targetUrl: FAILURE_LINK_URL,
     });
@@ -70,25 +75,21 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 
   const metadata = await collectPageMetadata(tab);
-  const payload = buildPayload(selection, metadata);
 
   try {
-    console.log("here");
-    const response = await postWithTimeout(PROXY_ENDPOINT, payload, REQUEST_TIMEOUT_MS);
+    const { reply } = await sendSelectionToAssistant(selection, metadata);
+    const notificationMessage = formatAssistantReplyForNotification(reply);
 
-    if (!response.ok) {
-      throw new Error(`Proxy responded with ${response.status}`);
-    }
     await showNotification({
-      title: "Sent to ChatGPT",
-      message: "Your selection was forwarded successfully.",
+      title: "Assistant responded",
+      message: notificationMessage,
       isError: false,
       targetUrl: SUCCESS_LINK_URL,
     });
   } catch (error) {
     await showNotification({
-      title: "Failed to send",
-      message: error.message || "Unknown error while contacting the proxy.",
+      title: "Failed to reach Assistant",
+      message: error?.message || "Unknown error while contacting OpenAI.",
       isError: true,
       targetUrl: FAILURE_LINK_URL,
     });
@@ -109,6 +110,231 @@ async function createOrUpdateContextMenu() {
   });
 }
 
+async function sendSelectionToAssistant(selection, metadata) {
+  const prompt = buildAssistantPrompt(selection, metadata);
+  const threadId = await createThread();
+  await addUserMessage(threadId, prompt);
+  const runId = await createRun(threadId);
+  const reply = await waitForRunResult(threadId, runId);
+
+  return { reply, threadId, runId };
+}
+
+async function createThread() {
+  const response = await openaiRequest("/threads", {
+    method: "POST",
+    body: {},
+  });
+
+  if (!response?.id) {
+    throw new Error("OpenAI did not return a conversation id.");
+  }
+
+  return response.id;
+}
+
+async function addUserMessage(threadId, prompt) {
+  await openaiRequest(`/threads/${threadId}/messages`, {
+    method: "POST",
+    body: {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: prompt,
+        },
+      ],
+    },
+  });
+}
+
+async function createRun(threadId) {
+  const response = await openaiRequest(`/threads/${threadId}/runs`, {
+    method: "POST",
+    body: {
+      assistant_id: OPENAI_ASSISTANT_ID,
+    },
+  });
+
+  if (!response?.id) {
+    throw new Error("OpenAI did not return a run id.");
+  }
+
+  return response.id;
+}
+
+async function waitForRunResult(threadId, runId) {
+  const deadline = Date.now() + RUN_POLL_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    const run = await openaiRequest(`/threads/${threadId}/runs/${runId}`, {
+      method: "GET",
+    });
+
+    const status = run?.status;
+    if (status === "completed") {
+      return await fetchAssistantReply(threadId, runId);
+    }
+
+    if (status === "failed") {
+      const errorMessage = run?.last_error?.message || "Assistant run failed.";
+      throw new Error(errorMessage);
+    }
+
+    if (status === "cancelled" || status === "expired") {
+      throw new Error(`Assistant run ${status}.`);
+    }
+
+    if (status === "requires_action") {
+      throw new Error("Assistant requested tool outputs, which this extension does not support.");
+    }
+
+    await delay(RUN_POLL_INTERVAL_MS);
+  }
+
+  throw new Error("Timed out waiting for the assistant to finish.");
+}
+
+async function fetchAssistantReply(threadId, runId) {
+  const response = await openaiRequest(`/threads/${threadId}/messages?limit=20`, {
+    method: "GET",
+  });
+
+  const messages = Array.isArray(response?.data) ? response.data : [];
+  const matchingMessage =
+    messages.find((message) => message?.run_id === runId && message?.role === "assistant") ||
+    messages.find((message) => message?.role === "assistant");
+
+  return extractTextFromMessage(matchingMessage);
+}
+
+function extractTextFromMessage(message) {
+  if (!message?.content) {
+    return "";
+  }
+
+  const parts = message.content
+    .filter((part) => part?.type === "text")
+    .map((part) => part?.text?.value || "")
+    .filter(Boolean);
+
+  return parts.join("\n\n").trim();
+}
+
+async function openaiRequest(path, { method = "GET", body, headers = {} } = {}) {
+  if (!OPENAI_API_KEY) {
+    throw new Error("OpenAI API key is missing. Update extension/config.js.");
+  }
+
+  const url = buildOpenAIUrl(path);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
+        Accept: "application/json",
+        ...headers,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    const isJson = response.headers.get("content-type")?.includes("application/json");
+    const payload = responseText && isJson ? JSON.parse(responseText) : responseText;
+
+    if (!response.ok) {
+      const message =
+        payload?.error?.message ||
+        payload?.message ||
+        (typeof payload === "string" && payload.trim()) ||
+        `OpenAI returned status ${response.status}`;
+      throw new Error(message);
+    }
+
+    return payload;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("Request timed out while contacting OpenAI.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildOpenAIUrl(path) {
+  const base = (OPENAI_BASE_URL || "").replace(/\/+$/, "");
+  const trimmedPath = String(path || "").replace(/^\/+/, "");
+  return `${base}/${trimmedPath}`;
+}
+
+function buildAssistantPrompt(selection, metadata) {
+  const lines = [
+    "The user highlighted the following text:",
+    selection,
+  ];
+
+  const contextLines = [];
+
+  if (metadata.url) contextLines.push(`- Page URL: ${metadata.url}`);
+  if (metadata.title) contextLines.push(`- Page Title: ${metadata.title}`);
+  if (metadata.language) contextLines.push(`- Language: ${metadata.language}`);
+  if (metadata.description) contextLines.push(`- Meta Description: ${metadata.description}`);
+  if (metadata.ogTitle) contextLines.push(`- Open Graph Title: ${metadata.ogTitle}`);
+  if (metadata.ogDescription) contextLines.push(`- Open Graph Description: ${metadata.ogDescription}`);
+  if (metadata.referrer) contextLines.push(`- Referrer: ${metadata.referrer}`);
+  if (metadata.userAgent) contextLines.push(`- User Agent: ${metadata.userAgent}`);
+
+  if (contextLines.length) {
+    lines.push("", "Additional page context:", ...contextLines);
+  } else {
+    lines.push("", "No additional page metadata was available.");
+  }
+
+  lines.push(
+    "",
+    `Source extension: ${manifest.name} v${manifest.version}`
+  );
+
+  return lines.join("\n");
+}
+
+function formatAssistantReplyForNotification(reply) {
+  if (!reply) {
+    return "Sent request to the OpenAI Assistant successfully.";
+  }
+
+  const normalized = reply.replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return "Assistant returned an empty response.";
+  }
+
+  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
+}
+
+function validateAssistantsConfiguration() {
+  if (!OPENAI_BASE_URL) {
+    return "Update extension/config.js with your OpenAI base URL.";
+  }
+
+  if (!OPENAI_API_KEY || OPENAI_API_KEY === "sk-your-api-key") {
+    return "Update extension/config.js with your OpenAI API key.";
+  }
+
+  if (!OPENAI_ASSISTANT_ID || OPENAI_ASSISTANT_ID === "asst_yourAssistantId") {
+    return "Update extension/config.js with your OpenAI assistant id.";
+  }
+
+  return null;
+}
+
 async function collectPageMetadata(tab) {
   if (!tab?.id) {
     return fallbackMetadata(tab);
@@ -119,8 +345,8 @@ async function collectPageMetadata(tab) {
       target: { tabId: tab.id },
       func: () => {
         const getMeta = (name) =>
-          document.querySelector(`meta[name=\"${name}\"]`)?.content ||
-          document.querySelector(`meta[property=\"${name}\"]`)?.content ||
+          document.querySelector(`meta[name="${name}"]`)?.content ||
+          document.querySelector(`meta[property="${name}"]`)?.content ||
           null;
 
         return {
@@ -163,45 +389,6 @@ function fallbackMetadata(tab) {
   };
 }
 
-function buildPayload(selection, metadata) {
-  return {
-    createdAt: new Date().toISOString(),
-    selection,
-    metadata: {
-      pageUrl: metadata.url,
-      pageTitle: metadata.title,
-      language: metadata.language,
-      description: metadata.description,
-      ogTitle: metadata.ogTitle,
-      ogDescription: metadata.ogDescription,
-      referrer: metadata.referrer,
-      userAgent: metadata.userAgent,
-    },
-    source: {
-      extension: manifest.name,
-      version: manifest.version,
-    },
-  };
-}
-
-async function postWithTimeout(url, data, timeoutMs) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(data),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function showNotification({ title, message, isError, targetUrl }) {
   const notificationId = createNotificationId();
   const options = {
@@ -213,7 +400,7 @@ async function showNotification({ title, message, isError, targetUrl }) {
   };
 
   if (isError) {
-    options.title = title || "Send to ChatGPT (via Proxy)";
+    options.title = title || "Send to ChatGPT (Assistants API)";
   }
 
   if (targetUrl) {
@@ -233,4 +420,8 @@ function createNotificationId() {
     return `send-to-chatgpt-${globalThis.crypto.randomUUID()}`;
   }
   return `send-to-chatgpt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

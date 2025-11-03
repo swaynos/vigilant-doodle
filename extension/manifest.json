@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Send to ChatGPT (via Proxy)",
+  "name": "Send to ChatGPT (Assistants API)",
   "version": "0.1.0",
-  "description": "Send selected text and page metadata to a ChatGPT proxy endpoint from the context menu.",
+  "description": "Send selected text and page metadata to an OpenAI Assistant from the context menu.",
   "permissions": [
     "contextMenus",
     "notifications",
@@ -10,7 +10,7 @@
     "scripting"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://api.openai.com/*"
   ],
   "background": {
     "service_worker": "background.js",
