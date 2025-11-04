@@ -1,7 +1,10 @@
 import { OLLAMA_BASE_URL, OLLAMA_MODEL } from "./config.js";
 import { getPromptTemplate } from "./prompt-prefix.js";
 
-const REQUEST_TIMEOUT_MS = 20000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60000;
+const TOAST_DISPLAY_DURATION_MS = 30000;
+const TOAST_FADE_DURATION_MS = 200;
+const LOG_DIRECTORY = "send-to-ollama-logs";
 
 const manifest = chrome.runtime.getManifest();
 
@@ -10,6 +13,7 @@ const ACTIONS = Object.freeze({
     id: "send-to-ollama:summarize",
     title: "Summarize with AI",
     promptKey: "summarize",
+    timeoutMs: 60000,
     systemPrompt:
       "You are helping a browser extension user who highlighted part of a conversation. Provide a concise summary that captures the key topic, decisions, follow-ups, and blockers.",
     successTitle: "Summary ready",
@@ -20,6 +24,7 @@ const ACTIONS = Object.freeze({
     id: "send-to-ollama:format",
     title: "Format chat with AI",
     promptKey: "format",
+    timeoutMs: 180000,
     systemPrompt:
       "You are helping a browser extension user tidy up a conversation snippet. Preserve the original meaning and speaker ordering while returning a clean, portable Markdown-friendly version.",
     successTitle: "Formatted chat ready",
@@ -113,28 +118,58 @@ async function createOrUpdateContextMenu() {
 async function sendSelectionToOllama(selection, action) {
   const promptTemplate = await getPromptTemplate(action.promptKey);
   const prompt = buildAssistantPrompt(selection, promptTemplate);
+  const timestampIso = new Date().toISOString();
+  const logBaseName = createLogBaseName(action, timestampIso);
 
-  const response = await ollamaRequest("/api/chat", {
-    method: "POST",
-    body: {
-      model: OLLAMA_MODEL,
-      stream: false,
-      messages: [
-        {
-          role: "system",
-          content: action.systemPrompt,
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-    },
-  });
+  try {
+    const response = await ollamaRequest("/api/chat", {
+      method: "POST",
+      timeoutMs: action?.timeoutMs,
+      body: {
+        model: OLLAMA_MODEL,
+        stream: false,
+        messages: [
+          {
+            role: "system",
+            content: action.systemPrompt,
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+      },
+    });
 
-  const reply = extractTextFromOllamaResponse(response);
+    const reply = extractTextFromOllamaResponse(response);
 
-  return { reply };
+    writeRequestLog({
+      logBaseName,
+      action,
+      selection,
+      prompt,
+      status: "success",
+      reply,
+      timestampIso,
+    }).catch((logError) => {
+      console.error("Failed to record successful request log.", logError);
+    });
+
+    return { reply };
+  } catch (error) {
+    writeRequestLog({
+      logBaseName,
+      action,
+      selection,
+      prompt,
+      status: "error",
+      error,
+      timestampIso,
+    }).catch((logError) => {
+      console.error("Failed to record error request log.", logError);
+    });
+    throw error;
+  }
 }
 
 function extractTextFromOllamaResponse(payload) {
@@ -171,14 +206,19 @@ function extractTextFromOllamaResponse(payload) {
   return "";
 }
 
-async function ollamaRequest(path, { method = "GET", body, headers = {} } = {}) {
+async function ollamaRequest(
+  path,
+  { method = "GET", body, headers = {}, timeoutMs } = {}
+) {
   if (!OLLAMA_BASE_URL) {
     throw new Error("Ollama base URL is missing. Update extension/config.js.");
   }
 
   const url = buildOllamaUrl(path);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const effectiveTimeout =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
 
   try {
     const response = await fetch(url, {
@@ -209,7 +249,9 @@ async function ollamaRequest(path, { method = "GET", body, headers = {} } = {}) 
     return payload;
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error("Request timed out while contacting Ollama.");
+      throw new Error(
+        `Request timed out after ${Math.round(effectiveTimeout / 1000)} seconds while contacting Ollama.`
+      );
     }
     throw error;
   } finally {
@@ -254,6 +296,142 @@ function formatAssistantReplyForNotification(reply) {
   return normalized.length > 600 ? `${normalized.slice(0, 597)}...` : normalized;
 }
 
+function createLogBaseName(action, isoTimestamp) {
+  const timestampSegment = sanitizeFilenameSegment(
+    (isoTimestamp || new Date().toISOString()).replace(/[:.]/g, "-")
+  );
+  const actionSegment = sanitizeFilenameSegment(
+    action?.promptKey || action?.id || "request"
+  );
+  const uniqueSegment = sanitizeFilenameSegment(
+    typeof crypto?.randomUUID === "function"
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2, 10)
+  );
+
+  return `${timestampSegment}-${actionSegment}-${uniqueSegment}`.toLowerCase();
+}
+
+async function writeRequestLog({
+  logBaseName,
+  action,
+  selection,
+  prompt,
+  status,
+  reply,
+  error,
+  timestampIso,
+}) {
+  try {
+    const lines = [
+      `Timestamp: ${timestampIso}`,
+      `Action ID: ${action?.id || "n/a"}`,
+      `Prompt key: ${action?.promptKey || "n/a"}`,
+      "",
+      "=== Input ===",
+      "Selected text:",
+      selection || "(empty)",
+      "",
+      "Prompt sent to Ollama:",
+      prompt || "(empty)",
+      "",
+      "=== Output ===",
+    ];
+
+    if (status === "error") {
+      lines.push(
+        "Status: error",
+        "",
+        "Error message:",
+        error?.message || "Unknown error.",
+        ""
+      );
+
+      if (error?.stack) {
+        lines.push("Stack trace:", error.stack, "");
+      }
+    } else {
+      lines.push("Status: success", "", "Assistant reply:", reply || "(empty)");
+    }
+
+    await writeLogFile(`${logBaseName}.txt`, lines.join("\n"));
+  } catch (logError) {
+    throw logError;
+  }
+}
+
+async function writeLogFile(filename, contents) {
+  try {
+    if (!chrome?.downloads?.download) {
+      console.warn("Downloads API unavailable; skipping log file creation.");
+      return;
+    }
+
+    await downloadFile({
+      url: createDataUrlFromText(contents),
+      filename: `${LOG_DIRECTORY}/${filename}`,
+      conflictAction: "uniquify",
+      saveAs: false,
+    });
+  } catch (error) {
+    console.error("Failed to write log file.", error);
+  }
+}
+
+function downloadFile(options) {
+  return new Promise((resolve, reject) => {
+    chrome.downloads.download(options, (downloadId) => {
+      if (chrome.runtime.lastError || downloadId === undefined) {
+        reject(
+          new Error(
+            chrome.runtime.lastError?.message || "Failed to schedule download."
+          )
+        );
+        return;
+      }
+      resolve(downloadId);
+    });
+  });
+}
+
+function sanitizeFilenameSegment(value) {
+  if (!value) {
+    return "unknown";
+  }
+
+  const sanitized = String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "");
+
+  return sanitized || "unknown";
+}
+
+function createDataUrlFromText(text) {
+  const safeText = text ?? "";
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(safeText);
+  const base64 = uint8ArrayToBase64(bytes);
+  return `data:text/plain;charset=utf-8;base64,${base64}`;
+}
+
+function uint8ArrayToBase64(uint8Array) {
+  if (!uint8Array?.length) {
+    return "";
+  }
+
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let index = 0; index < uint8Array.length; index += chunkSize) {
+    const chunk = uint8Array.subarray(index, index + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+
+  return btoa(binary);
+}
+
 function validateOllamaConfiguration() {
   if (!OLLAMA_BASE_URL) {
     return "Update extension/config.js with your Ollama base URL.";
@@ -288,6 +466,8 @@ async function showNotification({
             copyText: copyText || "",
             helperText: helperText || "",
             copyLabel: copyLabel || "",
+            displayDurationMs: TOAST_DISPLAY_DURATION_MS,
+            fadeDurationMs: TOAST_FADE_DURATION_MS,
           },
         ],
       });
@@ -313,12 +493,25 @@ async function showNotification({
   await chrome.notifications.create(notificationId, options);
 }
 
-function injectToastIntoPage({ title, message, isError, copyText, helperText, copyLabel }) {
+function injectToastIntoPage({
+  title,
+  message,
+  isError,
+  copyText,
+  helperText,
+  copyLabel,
+  displayDurationMs,
+  fadeDurationMs,
+}) {
   try {
     const containerId = "send-to-ollama-toast-container";
     const styleId = "send-to-ollama-toast-styles";
-    const displayDurationMs = 12000;
-    const fadeDurationMs = 200;
+    const visibleDuration =
+      Number.isFinite(displayDurationMs) && displayDurationMs > 0
+        ? displayDurationMs
+        : 30000;
+    const transitionDuration =
+      Number.isFinite(fadeDurationMs) && fadeDurationMs >= 0 ? fadeDurationMs : 200;
 
     ensureStyles();
     const container = ensureContainer();
@@ -361,7 +554,7 @@ function injectToastIntoPage({ title, message, isError, copyText, helperText, co
       toast.classList.add("send-to-ollama-toast--leaving");
       window.setTimeout(() => {
         toast.remove();
-      }, fadeDurationMs);
+      }, transitionDuration);
     };
 
     const actions = document.createElement("div");
@@ -412,7 +605,7 @@ function injectToastIntoPage({ title, message, isError, copyText, helperText, co
 
     let autoRemoveTimer = window.setTimeout(() => {
       dismiss();
-    }, displayDurationMs);
+    }, visibleDuration);
 
     const cancelAutoRemove = () => {
       if (!autoRemoveTimer) {
@@ -429,14 +622,14 @@ function injectToastIntoPage({ title, message, isError, copyText, helperText, co
       toast.classList.add("send-to-ollama-toast--leaving");
       window.setTimeout(() => {
         dismiss();
-      }, fadeDurationMs);
+      }, transitionDuration);
     });
 
     toast.addEventListener("focusout", () => {
       toast.classList.add("send-to-ollama-toast--leaving");
       window.setTimeout(() => {
         dismiss();
-      }, fadeDurationMs);
+      }, transitionDuration);
     });
 
     function ensureContainer() {
@@ -517,47 +710,47 @@ function injectToastIntoPage({ title, message, isError, copyText, helperText, co
           word-break: break-word;
         }
         .send-to-ollama-toast__helper {
-          margin: 0 0 8px 0;
-          font-size: 13px;
-          color: rgba(249, 250, 251, 0.85);
+          margin: 0 0 10px 0;
+          color: rgba(255, 255, 255, 0.7);
         }
         .send-to-ollama-toast__actions {
-          margin-top: 14px;
+          margin-top: 12px;
           display: flex;
-          flex-wrap: wrap;
           gap: 8px;
         }
         .send-to-ollama-toast__button {
-          cursor: pointer;
-          border-radius: 6px;
+          appearance: none;
           border: none;
+          border-radius: 6px;
           padding: 6px 12px;
           font-size: 13px;
           font-weight: 500;
-          background: #2563eb;
-          color: #ffffff;
+          cursor: pointer;
+          background: rgba(59, 130, 246, 0.9);
+          color: #f9fafb;
+          transition: background 0.15s ease-out, transform 0.15s ease-out;
         }
-        .send-to-ollama-toast__button:focus {
-          outline: 2px solid rgba(37, 99, 235, 0.35);
-          outline-offset: 2px;
+        .send-to-ollama-toast__button:hover:not(:disabled) {
+          background: rgba(37, 99, 235, 0.95);
+        }
+        .send-to-ollama-toast__button:disabled {
+          cursor: default;
+          background: rgba(59, 130, 246, 0.5);
         }
         .send-to-ollama-toast__button--tertiary {
-          background: transparent;
-          color: inherit;
-          border: 1px solid rgba(255, 255, 255, 0.2);
+          background: rgba(255, 255, 255, 0.15);
+          color: #f9fafb;
         }
-        .send-to-ollama-toast__button--tertiary:focus {
-          outline: 2px solid rgba(148, 163, 184, 0.4);
-          outline-offset: 2px;
+        .send-to-ollama-toast__button--tertiary:hover {
+          background: rgba(255, 255, 255, 0.25);
         }
       `;
-      (document.head || document.documentElement).appendChild(style);
+      document.head.appendChild(style);
     }
   } catch (error) {
-    console.error("Failed to inject toast notification.", error);
+    console.error("Failed to inject toast notification", error);
   }
 }
-
 function createNotificationId() {
   if (globalThis.crypto?.randomUUID) {
     return `send-to-ollama-${globalThis.crypto.randomUUID()}`;
