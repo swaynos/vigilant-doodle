@@ -4,9 +4,9 @@ Chrome context-menu helper that sends highlighted text to a locally running Olla
 
 ## Quick Start
 1. Run Ollama locally  
-   Install Ollama and ensure `ollama serve` is running (defaults to `http://127.0.0.1:11434`). Pull the model you plan to use (for example `ollama pull qwen3:14b`) and set `OLLAMA_ORIGINS` so your extension’s origin is allowed (e.g. `export OLLAMA_ORIGINS=*` while testing, then restart Ollama).
+   Install Ollama and ensure `ollama serve` is running (defaults to `http://127.0.0.1:11434`). Pull the model you plan to use (for example `ollama pull qwen3:8b`) and set `OLLAMA_ORIGINS` so your extension’s origin is allowed (e.g. `export OLLAMA_ORIGINS=*`  or `launchctl setenv OLLAMA_ORIGINS "*"` on macOS while testing, then restart Ollama).
 2. Configure the extension  
-   - Edit `extension/config.js` to match your Ollama base URL or preferred model. Defaults are `http://127.0.0.1:11434` and `qwen3:14b`.  
+   - Edit `extension/config.js` to match your Ollama base URL or preferred model. Defaults are `http://127.0.0.1:11434` and `qwen3:8b`.  
    - (Optional) Adjust the prompt templates in `extension/prompts/` (for example `summarize.txt` and `format.txt`) to customize the instructions sent to Ollama.
 3. (Optional) Narrow permissions  
    If you expose Ollama somewhere else, update `extension/manifest.json` `host_permissions` to match your endpoint.
@@ -28,7 +28,7 @@ Chrome context-menu helper that sends highlighted text to a locally running Olla
 
 ## Files Worth Knowing
 - `extension/background.js`: Manifest V3 service worker with context menus, prompt selection, Ollama API call, and notification plumbing.
-- `extension/config.js`: Base URL and model configuration for Ollama (defaults to `qwen3:14b`).
+- `extension/config.js`: Base URL and model configuration for Ollama (defaults to `qwen3:8b`).
 - `extension/prompt-prefix.js`: Loads and caches prompt templates from `extension/prompts/`.
 - `extension/prompts/`: Text templates for each action (`summarize.txt`, `format.txt`, etc.).
 - `extension/manifest.json`: Extension metadata and host permissions.

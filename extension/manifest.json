@@ -10,7 +10,7 @@
     "scripting",
     "downloads"
   ],
-  "host_permissions": ["http://127.0.0.1:11434/*", "http://callisto.local:11434/*"],
+  "host_permissions": ["http://localhost:11434/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
