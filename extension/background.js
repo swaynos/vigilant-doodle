@@ -1,16 +1,37 @@
 import { OLLAMA_BASE_URL, OLLAMA_MODEL } from "./config.js";
-import { getPromptPrefix } from "./prompt-prefix.js";
+import { getPromptTemplate } from "./prompt-prefix.js";
 
-const SUCCESS_LINK_URL = "https://ollama.com/library";
-const FAILURE_LINK_URL =
-  "https://github.com/ollama/ollama/blob/main/docs/troubleshooting.md";
-const CONTEXT_MENU_TITLE = "Send to Ollama";
 const REQUEST_TIMEOUT_MS = 20000;
 
-const MENU_ID = "send-to-ollama";
-const notificationLinks = new Map();
 const manifest = chrome.runtime.getManifest();
-const menuTitle = CONTEXT_MENU_TITLE?.trim() || "Send to Ollama";
+
+const ACTIONS = Object.freeze({
+  summarize: {
+    id: "send-to-ollama:summarize",
+    title: "Summarize with AI",
+    promptKey: "summarize",
+    systemPrompt:
+      "You are helping a browser extension user who highlighted part of a conversation. Provide a concise summary that captures the key topic, decisions, follow-ups, and blockers.",
+    successTitle: "Summary ready",
+    helperText: "Summary ready. Use Copy summary to add it to your clipboard.",
+    copyLabel: "Copy summary",
+  },
+  format: {
+    id: "send-to-ollama:format",
+    title: "Format chat with AI",
+    promptKey: "format",
+    systemPrompt:
+      "You are helping a browser extension user tidy up a conversation snippet. Preserve the original meaning and speaker ordering while returning a clean, portable Markdown-friendly version.",
+    successTitle: "Formatted chat ready",
+    helperText:
+      "Formatted chat ready. Use Copy formatted chat to add it to your clipboard.",
+    copyLabel: "Copy formatted chat",
+  },
+});
+
+const ACTIONS_BY_MENU_ID = new Map(
+  Object.values(ACTIONS).map((action) => [action.id, action])
+);
 
 chrome.runtime.onInstalled.addListener(async () => {
   await createOrUpdateContextMenu();
@@ -20,36 +41,9 @@ chrome.runtime.onStartup.addListener(async () => {
   await createOrUpdateContextMenu();
 });
 
-chrome.notifications.onClicked.addListener((notificationId) => {
-  const targetUrl = notificationLinks.get(notificationId);
-  if (targetUrl) {
-    openUrlInNewTab(targetUrl);
-  }
-  chrome.notifications.clear(notificationId);
-  notificationLinks.delete(notificationId);
-});
-
-chrome.notifications.onButtonClicked.addListener((notificationId) => {
-  const targetUrl = notificationLinks.get(notificationId);
-  if (targetUrl) {
-    openUrlInNewTab(targetUrl);
-  }
-  chrome.notifications.clear(notificationId);
-  notificationLinks.delete(notificationId);
-});
-
-chrome.notifications.onClosed.addListener((notificationId) => {
-  notificationLinks.delete(notificationId);
-});
-
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "send-to-ollama:open-link" && message.url) {
-    openUrlInNewTab(message.url);
-  }
-});
-
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== MENU_ID) {
+  const action = ACTIONS_BY_MENU_ID.get(info.menuItemId);
+  if (!action) {
     return;
   }
 
@@ -61,7 +55,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       title: "Ollama not configured",
       message: configError,
       isError: true,
-      targetUrl: FAILURE_LINK_URL,
       tabId: tab?.id,
     });
     return;
@@ -71,31 +64,31 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!selection) {
     await showNotification({
       title: "Nothing to send",
-      message: `Select some text before using "${menuTitle}".`,
+      message: `Select some text before using "${action.title}".`,
       isError: true,
-      targetUrl: FAILURE_LINK_URL,
       tabId: tab?.id,
     });
     return;
   }
 
   try {
-    const { reply } = await sendSelectionToOllama(selection);
+    const { reply } = await sendSelectionToOllama(selection, action);
     const notificationMessage = formatAssistantReplyForNotification(reply);
 
     await showNotification({
-      title: "Ollama responded",
+      title: action.successTitle,
       message: notificationMessage,
       isError: false,
-      targetUrl: SUCCESS_LINK_URL,
       tabId: tab?.id,
+      copyText: reply,
+      helperText: action.helperText,
+      copyLabel: action.copyLabel,
     });
   } catch (error) {
     await showNotification({
       title: "Failed to reach Ollama",
       message: error?.message || "Unknown error while contacting Ollama.",
       isError: true,
-      targetUrl: FAILURE_LINK_URL,
       tabId: tab?.id,
     });
   }
@@ -103,21 +96,23 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 async function createOrUpdateContextMenu() {
   try {
-    await chrome.contextMenus.remove(MENU_ID);
+    await chrome.contextMenus.removeAll();
   } catch (error) {
-    // Ignore missing menu errors.
+    // Ignore failures when menu entries do not exist yet.
   }
 
-  chrome.contextMenus.create({
-    id: MENU_ID,
-    title: menuTitle,
-    contexts: ["selection"],
-  });
+  for (const action of Object.values(ACTIONS)) {
+    chrome.contextMenus.create({
+      id: action.id,
+      title: action.title,
+      contexts: ["selection"],
+    });
+  }
 }
 
-async function sendSelectionToOllama(selection) {
-  const promptPrefix = await getPromptPrefix();
-  const prompt = buildAssistantPrompt(selection, promptPrefix);
+async function sendSelectionToOllama(selection, action) {
+  const promptTemplate = await getPromptTemplate(action.promptKey);
+  const prompt = buildAssistantPrompt(selection, promptTemplate);
 
   const response = await ollamaRequest("/api/chat", {
     method: "POST",
@@ -127,8 +122,7 @@ async function sendSelectionToOllama(selection) {
       messages: [
         {
           role: "system",
-          content:
-            "You are helping a browser extension user who highlighted part of a Slack conversation. Summarize the snippet into a concise, meaningful update that captures key decisions, action items, and blockers.",
+          content: action.systemPrompt,
         },
         {
           role: "user",
@@ -229,14 +223,14 @@ function buildOllamaUrl(path) {
   return `${base}/${trimmedPath}`;
 }
 
-function buildAssistantPrompt(selection, promptPrefix = "") {
+function buildAssistantPrompt(selection, promptTemplate = "") {
   const lines = [];
 
-  if (promptPrefix) {
-    lines.push(promptPrefix, "");
+  if (promptTemplate) {
+    lines.push(promptTemplate, "");
   }
 
-  lines.push("Slack conversation snippet:", selection);
+  lines.push("Conversation snippet:", selection);
 
   lines.push("", `Source extension: ${manifest.name} v${manifest.version}`);
 
@@ -248,13 +242,16 @@ function formatAssistantReplyForNotification(reply) {
     return "Sent request to the Ollama model successfully.";
   }
 
-  const normalized = reply.replace(/\s+/g, " ").trim();
+  const normalized = reply
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
   if (!normalized) {
     return "Ollama returned an empty response.";
   }
 
-  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
+  return normalized.length > 600 ? `${normalized.slice(0, 597)}...` : normalized;
 }
 
 function validateOllamaConfiguration() {
@@ -269,7 +266,15 @@ function validateOllamaConfiguration() {
   return null;
 }
 
-async function showNotification({ title, message, isError, targetUrl, tabId }) {
+async function showNotification({
+  title,
+  message,
+  isError,
+  tabId,
+  copyText,
+  helperText,
+  copyLabel,
+}) {
   if (tabId) {
     try {
       await chrome.scripting.executeScript({
@@ -280,7 +285,9 @@ async function showNotification({ title, message, isError, targetUrl, tabId }) {
             title: title || "",
             message: message || "",
             isError: Boolean(isError),
-            targetUrl: targetUrl || null,
+            copyText: copyText || "",
+            helperText: helperText || "",
+            copyLabel: copyLabel || "",
           },
         ],
       });
@@ -303,19 +310,14 @@ async function showNotification({ title, message, isError, targetUrl, tabId }) {
     options.title = title || "Send to Ollama";
   }
 
-  if (targetUrl) {
-    options.buttons = [{ title: "Open link" }];
-    notificationLinks.set(notificationId, targetUrl);
-  }
-
   await chrome.notifications.create(notificationId, options);
 }
 
-function injectToastIntoPage({ title, message, isError, targetUrl }) {
+function injectToastIntoPage({ title, message, isError, copyText, helperText, copyLabel }) {
   try {
     const containerId = "send-to-ollama-toast-container";
     const styleId = "send-to-ollama-toast-styles";
-    const displayDurationMs = 8000;
+    const displayDurationMs = 12000;
     const fadeDurationMs = 200;
 
     ensureStyles();
@@ -334,6 +336,15 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
       titleEl.className = "send-to-ollama-toast__title";
       titleEl.textContent = title;
       toast.appendChild(titleEl);
+    }
+
+    if (!isError && copyText) {
+      const helperEl = document.createElement("p");
+      helperEl.className = "send-to-ollama-toast__helper";
+      helperEl.textContent =
+        helperText ||
+        "Result ready. Use Copy result to add it to your clipboard.";
+      toast.appendChild(helperEl);
     }
 
     if (message) {
@@ -356,19 +367,30 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
     const actions = document.createElement("div");
     actions.className = "send-to-ollama-toast__actions";
 
-    if (targetUrl) {
-      const openButton = document.createElement("button");
-      openButton.type = "button";
-      openButton.className = "send-to-ollama-toast__button";
-      openButton.textContent = "Open link";
-      openButton.addEventListener("click", () => {
-        chrome.runtime.sendMessage({
-          type: "send-to-ollama:open-link",
-          url: targetUrl,
-        });
-        dismiss();
+    if (!isError && copyText) {
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.className = "send-to-ollama-toast__button";
+      const defaultCopyLabel = copyLabel || "Copy result";
+      copyButton.textContent = defaultCopyLabel;
+      copyButton.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(copyText);
+          copyButton.textContent = "Copied!";
+          copyButton.disabled = true;
+          window.setTimeout(() => {
+            copyButton.textContent = defaultCopyLabel;
+            copyButton.disabled = false;
+          }, 2000);
+        } catch (error) {
+          console.error("Failed to copy result to clipboard.", error);
+          copyButton.textContent = "Copy failed";
+          window.setTimeout(() => {
+            copyButton.textContent = defaultCopyLabel;
+          }, 2000);
+        }
       });
-      actions.appendChild(openButton);
+      actions.appendChild(copyButton);
     }
 
     const dismissButton = document.createElement("button");
@@ -494,6 +516,11 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
           white-space: pre-wrap;
           word-break: break-word;
         }
+        .send-to-ollama-toast__helper {
+          margin: 0 0 8px 0;
+          font-size: 13px;
+          color: rgba(249, 250, 251, 0.85);
+        }
         .send-to-ollama-toast__actions {
           margin-top: 14px;
           display: flex;
@@ -529,10 +556,6 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
   } catch (error) {
     console.error("Failed to inject toast notification.", error);
   }
-}
-
-function openUrlInNewTab(url) {
-  chrome.tabs.create({ url });
 }
 
 function createNotificationId() {

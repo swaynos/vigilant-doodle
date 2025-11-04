@@ -1,36 +1,54 @@
-const PROMPT_PREFIX_PATH = "prompt-prefix.txt";
+const PROMPT_FILES = Object.freeze({
+  summarize: "prompts/summarize.txt",
+  format: "prompts/format.txt",
+});
 
-let cachedPrefix = null;
-let loadPromise = null;
+const promptCache = new Map();
+const loadPromises = new Map();
 
-export async function getPromptPrefix() {
-  if (cachedPrefix !== null) {
-    return cachedPrefix;
+export async function getPromptTemplate(key) {
+  if (!PROMPT_FILES[key]) {
+    console.warn(`Requested unknown prompt template "${key}".`);
+    return "";
   }
 
-  if (!loadPromise) {
-    loadPromise = loadPromptPrefixFromFile().finally(() => {
-      loadPromise = null;
-    });
+  if (promptCache.has(key)) {
+    return promptCache.get(key);
   }
 
-  cachedPrefix = await loadPromise;
-  return cachedPrefix;
+  if (!loadPromises.has(key)) {
+    loadPromises.set(
+      key,
+      loadPromptTemplateFromFile(PROMPT_FILES[key])
+        .then((template) => {
+          promptCache.set(key, template);
+          return template;
+        })
+        .finally(() => {
+          loadPromises.delete(key);
+        })
+    );
+  }
+
+  return loadPromises.get(key);
 }
 
-async function loadPromptPrefixFromFile() {
+export function listPromptTemplates() {
+  return Object.keys(PROMPT_FILES);
+}
+
+async function loadPromptTemplateFromFile(path) {
   try {
-    const resourceUrl = chrome.runtime.getURL(PROMPT_PREFIX_PATH);
+    const resourceUrl = chrome.runtime.getURL(path);
     const response = await fetch(resourceUrl);
 
     if (!response.ok) {
-      throw new Error(`Failed to load prompt prefix (status ${response.status}).`);
+      throw new Error(`Failed to load prompt template (status ${response.status}).`);
     }
 
-    const prefix = (await response.text()).trim();
-    return prefix;
+    return (await response.text()).trim();
   } catch (error) {
-    console.error("Unable to read prompt prefix. Falling back to empty prefix.", error);
+    console.error(`Unable to read prompt template "${path}".`, error);
     return "";
   }
 }
