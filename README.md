@@ -6,7 +6,8 @@ Chrome context-menu helper that sends highlighted text and page metadata to a lo
 1. Run Ollama locally  
    Install Ollama and ensure `ollama serve` is running (defaults to `http://127.0.0.1:11434`). Pull the model you plan to use (for example `ollama pull qwen3:14b`) and set `OLLAMA_ORIGINS` so your extension’s origin is allowed (e.g. `export OLLAMA_ORIGINS=*` while testing, then restart Ollama).
 2. Configure the extension  
-   Edit `extension/config.js` to match your Ollama base URL or preferred model. Defaults are `http://127.0.0.1:11434` and `qwen3:14b`.
+   - Edit `extension/config.js` to match your Ollama base URL or preferred model. Defaults are `http://127.0.0.1:11434` and `qwen3:14b`.  
+   - (Optional) Tweak `extension/prompt-prefix.txt` to change the instruction block that is prepended to every request sent to Ollama. The default prompt is tailored to summarizing Slack conversation snippets.
 3. (Optional) Narrow permissions  
    If you expose Ollama somewhere else, update `extension/manifest.json` `host_permissions` to match your endpoint.
 4. Load the unpacked extension  
@@ -17,8 +18,7 @@ Chrome context-menu helper that sends highlighted text and page metadata to a lo
 
 ## How It Works
 - Adds a selection-only context menu entry.
-- Collects tab metadata (title, URL, language, meta/OG descriptions, referrer, user agent).
-- Builds a single prompt that includes the selection plus metadata and posts it to Ollama’s `/api/chat` endpoint.
+- Builds a prompt that combines the configurable prefix and the highlighted Slack snippet, then posts it to Ollama’s `/api/chat` endpoint.
 - Displays the model’s reply (trimmed for length) in a notification; clicking it (or the button) opens the configured follow-up link.
 
 ### Allowing Chrome origins
@@ -29,5 +29,6 @@ Chrome context-menu helper that sends highlighted text and page metadata to a lo
 ## Files Worth Knowing
 - `extension/background.js`: Manifest V3 service worker with context menu, metadata capture, Ollama API call, and notification plumbing.
 - `extension/config.js`: Base URL and model configuration for Ollama (defaults to `qwen3:14b`).
+- `extension/prompt-prefix.txt`: Human-readable instructions that are prefixed to the selected Slack snippet before contacting Ollama.
 - `extension/manifest.json`: Extension metadata and host permissions.
 - `extension/icons/`: Simple placeholder PNGs.

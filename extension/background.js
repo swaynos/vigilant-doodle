@@ -1,4 +1,5 @@
 import { OLLAMA_BASE_URL, OLLAMA_MODEL } from "./config.js";
+import { getPromptPrefix } from "./prompt-prefix.js";
 
 const SUCCESS_LINK_URL = "https://ollama.com/library";
 const FAILURE_LINK_URL =
@@ -78,10 +79,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
 
-  const metadata = await collectPageMetadata(tab);
-
   try {
-    const { reply } = await sendSelectionToOllama(selection, metadata);
+    const { reply } = await sendSelectionToOllama(selection);
     const notificationMessage = formatAssistantReplyForNotification(reply);
 
     await showNotification({
@@ -116,8 +115,9 @@ async function createOrUpdateContextMenu() {
   });
 }
 
-async function sendSelectionToOllama(selection, metadata) {
-  const prompt = buildAssistantPrompt(selection, metadata);
+async function sendSelectionToOllama(selection) {
+  const promptPrefix = await getPromptPrefix();
+  const prompt = buildAssistantPrompt(selection, promptPrefix);
 
   const response = await ollamaRequest("/api/chat", {
     method: "POST",
@@ -128,7 +128,7 @@ async function sendSelectionToOllama(selection, metadata) {
         {
           role: "system",
           content:
-            "You are helping a browser extension user who highlighted some text. Provide a concise, helpful answer informed by the provided selection and metadata.",
+            "You are helping a browser extension user who highlighted part of a Slack conversation. Summarize the snippet into a concise, meaningful update that captures key decisions, action items, and blockers.",
         },
         {
           role: "user",
@@ -229,27 +229,14 @@ function buildOllamaUrl(path) {
   return `${base}/${trimmedPath}`;
 }
 
-function buildAssistantPrompt(selection, metadata) {
-  const lines = ["The user highlighted the following text:", selection];
+function buildAssistantPrompt(selection, promptPrefix = "") {
+  const lines = [];
 
-  const contextLines = [];
-
-  if (metadata.url) contextLines.push(`- Page URL: ${metadata.url}`);
-  if (metadata.title) contextLines.push(`- Page Title: ${metadata.title}`);
-  if (metadata.language) contextLines.push(`- Language: ${metadata.language}`);
-  if (metadata.description)
-    contextLines.push(`- Meta Description: ${metadata.description}`);
-  if (metadata.ogTitle) contextLines.push(`- Open Graph Title: ${metadata.ogTitle}`);
-  if (metadata.ogDescription)
-    contextLines.push(`- Open Graph Description: ${metadata.ogDescription}`);
-  if (metadata.referrer) contextLines.push(`- Referrer: ${metadata.referrer}`);
-  if (metadata.userAgent) contextLines.push(`- User Agent: ${metadata.userAgent}`);
-
-  if (contextLines.length) {
-    lines.push("", "Additional page context:", ...contextLines);
-  } else {
-    lines.push("", "No additional page metadata was available.");
+  if (promptPrefix) {
+    lines.push(promptPrefix, "");
   }
+
+  lines.push("Slack conversation snippet:", selection);
 
   lines.push("", `Source extension: ${manifest.name} v${manifest.version}`);
 
@@ -280,60 +267,6 @@ function validateOllamaConfiguration() {
   }
 
   return null;
-}
-
-async function collectPageMetadata(tab) {
-  if (!tab?.id) {
-    return fallbackMetadata(tab);
-  }
-
-  try {
-    const [result] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => {
-        const getMeta = (name) =>
-          document.querySelector(`meta[name="${name}"]`)?.content ||
-          document.querySelector(`meta[property="${name}"]`)?.content ||
-          null;
-
-        return {
-          url: window.location.href,
-          title: document.title,
-          language: document.documentElement.lang || navigator.language || null,
-          description: getMeta("description"),
-          ogTitle: getMeta("og:title"),
-          ogDescription: getMeta("og:description"),
-          referrer: document.referrer || null,
-          userAgent: navigator.userAgent,
-        };
-      },
-    });
-    return {
-      url: result?.result?.url ?? tab.url ?? null,
-      title: result?.result?.title ?? tab.title ?? null,
-      language: result?.result?.language ?? null,
-      description: result?.result?.description ?? null,
-      ogTitle: result?.result?.ogTitle ?? null,
-      ogDescription: result?.result?.ogDescription ?? null,
-      referrer: result?.result?.referrer ?? null,
-      userAgent: result?.result?.userAgent ?? null,
-    };
-  } catch (error) {
-    return fallbackMetadata(tab);
-  }
-}
-
-function fallbackMetadata(tab) {
-  return {
-    url: tab?.url ?? null,
-    title: tab?.title ?? null,
-    language: null,
-    description: null,
-    ogTitle: null,
-    ogDescription: null,
-    referrer: null,
-    userAgent: null,
-  };
 }
 
 async function showNotification({ title, message, isError, targetUrl, tabId }) {
