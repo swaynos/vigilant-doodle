@@ -1,26 +1,33 @@
 # vigilant-doodle
 
-Chrome context-menu helper that sends highlighted text and page metadata straight to an OpenAI Assistant using the Assistants API, then surfaces the result in a Chrome notification.
+Chrome context-menu helper that sends highlighted text and page metadata to a locally running Ollama model, then surfaces the result in a Chrome notification.
 
 ## Quick Start
-1. Set the Assistants API base URL  
-   Edit `extension/config.js` to point at your OpenAI-compatible base URL (defaults to `https://api.openai.com/v1`). Update the testing credentials in `extension/background.js` before trying the extension.
-2. (Optional) Narrow permissions  
-   If you use a custom base URL, update `extension/manifest.json` `host_permissions` to match (default is `https://api.openai.com/*`).
-3. Load the unpacked extension  
+1. Run Ollama locally  
+   Install Ollama and ensure `ollama serve` is running (defaults to `http://127.0.0.1:11434`). Pull the model you plan to use (for example `ollama pull qwen3:14b`) and set `OLLAMA_ORIGINS` so your extension’s origin is allowed (e.g. `export OLLAMA_ORIGINS=*` while testing, then restart Ollama).
+2. Configure the extension  
+   Edit `extension/config.js` to match your Ollama base URL or preferred model. Defaults are `http://127.0.0.1:11434` and `qwen3:14b`.
+3. (Optional) Narrow permissions  
+   If you expose Ollama somewhere else, update `extension/manifest.json` `host_permissions` to match your endpoint.
+4. Load the unpacked extension  
    - Open `chrome://extensions` in Chrome.  
    - Toggle **Developer mode** on.  
    - Choose **Load unpacked** and pick the `extension/` directory.  
-   - Highlight any page text, right-click, and select `Send to ChatGPT (Assistants API)` to test.
+   - Highlight any page text, right-click, and select `Send to Ollama` to test.
 
 ## How It Works
 - Adds a selection-only context menu entry.
-- Collects tab metadata (title, URL, language, meta/OG descriptions, referrer, UA).
-- Creates an Assistant thread, appends a user message containing the selection plus metadata, starts a run, and polls until it completes.
-- Displays the assistant’s reply (trimmed for length) in a notification; clicking it (or the button) opens the configured follow-up link.
+- Collects tab metadata (title, URL, language, meta/OG descriptions, referrer, user agent).
+- Builds a single prompt that includes the selection plus metadata and posts it to Ollama’s `/api/chat` endpoint.
+- Displays the model’s reply (trimmed for length) in a notification; clicking it (or the button) opens the configured follow-up link.
+
+### Allowing Chrome origins
+- Chrome extensions send requests with an origin such as `chrome-extension://abc123…`. Ollama blocks these unless `OLLAMA_ORIGINS` allows them (comma-separated list or `*`).
+- For systemd installs, add the environment variable to `/etc/systemd/system/ollama.service.d/override.conf`, run `sudo systemctl daemon-reload`, then `sudo systemctl restart ollama`.
+- On macOS (launchd), use `launchctl setenv OLLAMA_ORIGINS "*" && launchctl kickstart -k gui/$UID/com.ollama.ollama` while developing.
 
 ## Files Worth Knowing
-- `extension/background.js`: Manifest V3 service worker with context menu, metadata capture, Assistants API orchestration, and notifications. Contains testing-only constants for the API key, assistant id, and notification behavior.
-- `extension/config.js`: Minimal config exporting just the Assistants API base URL.
+- `extension/background.js`: Manifest V3 service worker with context menu, metadata capture, Ollama API call, and notification plumbing.
+- `extension/config.js`: Base URL and model configuration for Ollama (defaults to `qwen3:14b`).
 - `extension/manifest.json`: Extension metadata and host permissions.
 - `extension/icons/`: Simple placeholder PNGs.

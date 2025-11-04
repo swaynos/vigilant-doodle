@@ -1,19 +1,15 @@
-import { OPENAI_BASE_URL } from "./config.js";
+import { OLLAMA_BASE_URL, OLLAMA_MODEL } from "./config.js";
 
-// Testing-only credentials and behavior. Replace with secure storage before shipping.
-const OPENAI_API_KEY = "sk-your-api-key";
-const OPENAI_ASSISTANT_ID = "asst_yourAssistantId";
-const SUCCESS_LINK_URL = "https://platform.openai.com/";
-const FAILURE_LINK_URL = "https://help.openai.com/";
-const CONTEXT_MENU_TITLE = "Send to ChatGPT (Assistants API)";
+const SUCCESS_LINK_URL = "https://ollama.com/library";
+const FAILURE_LINK_URL =
+  "https://github.com/ollama/ollama/blob/main/docs/troubleshooting.md";
+const CONTEXT_MENU_TITLE = "Send to Ollama";
 const REQUEST_TIMEOUT_MS = 20000;
-const RUN_POLL_INTERVAL_MS = 1000;
-const RUN_POLL_TIMEOUT_MS = 60000;
 
-const MENU_ID = "send-to-chatgpt-assistants";
+const MENU_ID = "send-to-ollama";
 const notificationLinks = new Map();
 const manifest = chrome.runtime.getManifest();
-const menuTitle = CONTEXT_MENU_TITLE?.trim() || "Send to ChatGPT (Assistants API)";
+const menuTitle = CONTEXT_MENU_TITLE?.trim() || "Send to Ollama";
 
 chrome.runtime.onInstalled.addListener(async () => {
   await createOrUpdateContextMenu();
@@ -46,7 +42,7 @@ chrome.notifications.onClosed.addListener((notificationId) => {
 });
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "send-to-chatgpt:open-link" && message.url) {
+  if (message?.type === "send-to-ollama:open-link" && message.url) {
     openUrlInNewTab(message.url);
   }
 });
@@ -56,12 +52,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
 
-  debugger; // Force a breakpoint if the debugger is active
+  debugger; // Force a breakpoint if the debugger is active.
 
-  const configError = validateAssistantsConfiguration();
+  const configError = validateOllamaConfiguration();
   if (configError) {
     await showNotification({
-      title: "Assistants API not configured",
+      title: "Ollama not configured",
       message: configError,
       isError: true,
       targetUrl: FAILURE_LINK_URL,
@@ -85,11 +81,11 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const metadata = await collectPageMetadata(tab);
 
   try {
-    const { reply } = await sendSelectionToAssistant(selection, metadata);
+    const { reply } = await sendSelectionToOllama(selection, metadata);
     const notificationMessage = formatAssistantReplyForNotification(reply);
 
     await showNotification({
-      title: "Assistant responded",
+      title: "Ollama responded",
       message: notificationMessage,
       isError: false,
       targetUrl: SUCCESS_LINK_URL,
@@ -97,8 +93,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     });
   } catch (error) {
     await showNotification({
-      title: "Failed to reach Assistant",
-      message: error?.message || "Unknown error while contacting OpenAI.",
+      title: "Failed to reach Ollama",
+      message: error?.message || "Unknown error while contacting Ollama.",
       isError: true,
       targetUrl: FAILURE_LINK_URL,
       tabId: tab?.id,
@@ -120,123 +116,73 @@ async function createOrUpdateContextMenu() {
   });
 }
 
-async function sendSelectionToAssistant(selection, metadata) {
+async function sendSelectionToOllama(selection, metadata) {
   const prompt = buildAssistantPrompt(selection, metadata);
-  const threadId = await createThread();
-  await addUserMessage(threadId, prompt);
-  const runId = await createRun(threadId);
-  const reply = await waitForRunResult(threadId, runId);
 
-  return { reply, threadId, runId };
-}
-
-async function createThread() {
-  const response = await openaiRequest("/threads", {
-    method: "POST",
-    body: {},
-  });
-
-  if (!response?.id) {
-    throw new Error("OpenAI did not return a conversation id.");
-  }
-
-  return response.id;
-}
-
-async function addUserMessage(threadId, prompt) {
-  await openaiRequest(`/threads/${threadId}/messages`, {
+  const response = await ollamaRequest("/api/chat", {
     method: "POST",
     body: {
-      role: "user",
-      content: [
+      model: OLLAMA_MODEL,
+      stream: false,
+      messages: [
         {
-          type: "text",
-          text: prompt,
+          role: "system",
+          content:
+            "You are helping a browser extension user who highlighted some text. Provide a concise, helpful answer informed by the provided selection and metadata.",
+        },
+        {
+          role: "user",
+          content: prompt,
         },
       ],
     },
   });
+
+  const reply = extractTextFromOllamaResponse(response);
+
+  return { reply };
 }
 
-async function createRun(threadId) {
-  const response = await openaiRequest(`/threads/${threadId}/runs`, {
-    method: "POST",
-    body: {
-      assistant_id: OPENAI_ASSISTANT_ID,
-    },
-  });
-
-  if (!response?.id) {
-    throw new Error("OpenAI did not return a run id.");
-  }
-
-  return response.id;
-}
-
-async function waitForRunResult(threadId, runId) {
-  const deadline = Date.now() + RUN_POLL_TIMEOUT_MS;
-
-  while (Date.now() < deadline) {
-    const run = await openaiRequest(`/threads/${threadId}/runs/${runId}`, {
-      method: "GET",
-    });
-
-    const status = run?.status;
-    if (status === "completed") {
-      return await fetchAssistantReply(threadId, runId);
-    }
-
-    if (status === "failed") {
-      const errorMessage = run?.last_error?.message || "Assistant run failed.";
-      throw new Error(errorMessage);
-    }
-
-    if (status === "cancelled" || status === "expired") {
-      throw new Error(`Assistant run ${status}.`);
-    }
-
-    if (status === "requires_action") {
-      throw new Error("Assistant requested tool outputs, which this extension does not support.");
-    }
-
-    await delay(RUN_POLL_INTERVAL_MS);
-  }
-
-  throw new Error("Timed out waiting for the assistant to finish.");
-}
-
-async function fetchAssistantReply(threadId, runId) {
-  const response = await openaiRequest(`/threads/${threadId}/messages?limit=20`, {
-    method: "GET",
-  });
-
-  const messages = Array.isArray(response?.data) ? response.data : [];
-  const matchingMessage =
-    messages.find((message) => message?.run_id === runId && message?.role === "assistant") ||
-    messages.find((message) => message?.role === "assistant");
-
-  return extractTextFromMessage(matchingMessage);
-}
-
-function extractTextFromMessage(message) {
-  if (!message?.content) {
+function extractTextFromOllamaResponse(payload) {
+  if (!payload) {
     return "";
   }
 
-  const parts = message.content
-    .filter((part) => part?.type === "text")
-    .map((part) => part?.text?.value || "")
-    .filter(Boolean);
-
-  return parts.join("\n\n").trim();
-}
-
-async function openaiRequest(path, { method = "GET", body, headers = {} } = {}) {
-  if (!OPENAI_API_KEY) {
-    throw new Error("OpenAI API key is missing. Update extension/config.js.");
+  if (typeof payload === "string") {
+    return payload.trim();
   }
 
-  const url = buildOpenAIUrl(path);
+  if (typeof payload.response === "string") {
+    return payload.response.trim();
+  }
+
+  const message = payload.message;
+  if (!message) {
+    return "";
+  }
+
+  if (typeof message === "string") {
+    return message.trim();
+  }
+
+  const content = message.content;
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    return content.join("\n\n").trim();
+  }
+
+  return "";
+}
+
+async function ollamaRequest(path, { method = "GET", body, headers = {} } = {}) {
+  if (!OLLAMA_BASE_URL) {
+    throw new Error("Ollama base URL is missing. Update extension/config.js.");
+  }
+
+  const url = buildOllamaUrl(path);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -244,9 +190,7 @@ async function openaiRequest(path, { method = "GET", body, headers = {} } = {}) 
     const response = await fetch(url, {
       method,
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
-        "OpenAI-Beta": "assistants=v2",
         Accept: "application/json",
         ...headers,
       },
@@ -255,22 +199,23 @@ async function openaiRequest(path, { method = "GET", body, headers = {} } = {}) 
     });
 
     const responseText = await response.text();
-    const isJson = response.headers.get("content-type")?.includes("application/json");
+    const contentType = response.headers.get("content-type") || "";
+    const isJson = contentType.includes("application/json");
     const payload = responseText && isJson ? JSON.parse(responseText) : responseText;
 
     if (!response.ok) {
       const message =
-        payload?.error?.message ||
+        payload?.error ||
         payload?.message ||
         (typeof payload === "string" && payload.trim()) ||
-        `OpenAI returned status ${response.status}`;
-      throw new Error(message);
+        `Ollama returned status ${response.status}`;
+      throw new Error(Array.isArray(message) ? message.join(" ") : message);
     }
 
     return payload;
   } catch (error) {
     if (error?.name === "AbortError") {
-      throw new Error("Request timed out while contacting OpenAI.");
+      throw new Error("Request timed out while contacting Ollama.");
     }
     throw error;
   } finally {
@@ -278,26 +223,25 @@ async function openaiRequest(path, { method = "GET", body, headers = {} } = {}) 
   }
 }
 
-function buildOpenAIUrl(path) {
-  const base = (OPENAI_BASE_URL || "").replace(/\/+$/, "");
+function buildOllamaUrl(path) {
+  const base = (OLLAMA_BASE_URL || "").replace(/\/+$/, "");
   const trimmedPath = String(path || "").replace(/^\/+/, "");
   return `${base}/${trimmedPath}`;
 }
 
 function buildAssistantPrompt(selection, metadata) {
-  const lines = [
-    "The user highlighted the following text:",
-    selection,
-  ];
+  const lines = ["The user highlighted the following text:", selection];
 
   const contextLines = [];
 
   if (metadata.url) contextLines.push(`- Page URL: ${metadata.url}`);
   if (metadata.title) contextLines.push(`- Page Title: ${metadata.title}`);
   if (metadata.language) contextLines.push(`- Language: ${metadata.language}`);
-  if (metadata.description) contextLines.push(`- Meta Description: ${metadata.description}`);
+  if (metadata.description)
+    contextLines.push(`- Meta Description: ${metadata.description}`);
   if (metadata.ogTitle) contextLines.push(`- Open Graph Title: ${metadata.ogTitle}`);
-  if (metadata.ogDescription) contextLines.push(`- Open Graph Description: ${metadata.ogDescription}`);
+  if (metadata.ogDescription)
+    contextLines.push(`- Open Graph Description: ${metadata.ogDescription}`);
   if (metadata.referrer) contextLines.push(`- Referrer: ${metadata.referrer}`);
   if (metadata.userAgent) contextLines.push(`- User Agent: ${metadata.userAgent}`);
 
@@ -307,39 +251,32 @@ function buildAssistantPrompt(selection, metadata) {
     lines.push("", "No additional page metadata was available.");
   }
 
-  lines.push(
-    "",
-    `Source extension: ${manifest.name} v${manifest.version}`
-  );
+  lines.push("", `Source extension: ${manifest.name} v${manifest.version}`);
 
   return lines.join("\n");
 }
 
 function formatAssistantReplyForNotification(reply) {
   if (!reply) {
-    return "Sent request to the OpenAI Assistant successfully.";
+    return "Sent request to the Ollama model successfully.";
   }
 
   const normalized = reply.replace(/\s+/g, " ").trim();
 
   if (!normalized) {
-    return "Assistant returned an empty response.";
+    return "Ollama returned an empty response.";
   }
 
   return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
 }
 
-function validateAssistantsConfiguration() {
-  if (!OPENAI_BASE_URL) {
-    return "Update extension/config.js with your OpenAI base URL.";
+function validateOllamaConfiguration() {
+  if (!OLLAMA_BASE_URL) {
+    return "Update extension/config.js with your Ollama base URL.";
   }
 
-  if (!OPENAI_API_KEY || OPENAI_API_KEY === "sk-your-api-key") {
-    return "Update extension/config.js with your OpenAI API key.";
-  }
-
-  if (!OPENAI_ASSISTANT_ID || OPENAI_ASSISTANT_ID === "asst_yourAssistantId") {
-    return "Update extension/config.js with your OpenAI assistant id.";
+  if (!OLLAMA_MODEL) {
+    return "Update extension/config.js with the Ollama model to use.";
   }
 
   return null;
@@ -430,7 +367,7 @@ async function showNotification({ title, message, isError, targetUrl, tabId }) {
   };
 
   if (isError) {
-    options.title = title || "Send to ChatGPT (Assistants API)";
+    options.title = title || "Send to Ollama";
   }
 
   if (targetUrl) {
@@ -443,47 +380,57 @@ async function showNotification({ title, message, isError, targetUrl, tabId }) {
 
 function injectToastIntoPage({ title, message, isError, targetUrl }) {
   try {
-    const containerId = "send-to-chatgpt-toast-container";
-    const styleId = "send-to-chatgpt-toast-styles";
+    const containerId = "send-to-ollama-toast-container";
+    const styleId = "send-to-ollama-toast-styles";
     const displayDurationMs = 8000;
     const fadeDurationMs = 200;
 
     ensureStyles();
     const container = ensureContainer();
     const toast = document.createElement("div");
-    toast.className = "send-to-chatgpt-toast";
+    toast.className = "send-to-ollama-toast";
     toast.setAttribute("role", "alert");
     toast.setAttribute("aria-live", isError ? "assertive" : "polite");
 
     if (isError) {
-      toast.classList.add("send-to-chatgpt-toast--error");
+      toast.classList.add("send-to-ollama-toast--error");
     }
 
     if (title) {
       const titleEl = document.createElement("div");
-      titleEl.className = "send-to-chatgpt-toast__title";
+      titleEl.className = "send-to-ollama-toast__title";
       titleEl.textContent = title;
       toast.appendChild(titleEl);
     }
 
     if (message) {
       const messageEl = document.createElement("p");
-      messageEl.className = "send-to-chatgpt-toast__message";
+      messageEl.className = "send-to-ollama-toast__message";
       messageEl.textContent = message;
       toast.appendChild(messageEl);
     }
 
+    const dismiss = () => {
+      if (!toast.isConnected) {
+        return;
+      }
+      toast.classList.add("send-to-ollama-toast--leaving");
+      window.setTimeout(() => {
+        toast.remove();
+      }, fadeDurationMs);
+    };
+
     const actions = document.createElement("div");
-    actions.className = "send-to-chatgpt-toast__actions";
+    actions.className = "send-to-ollama-toast__actions";
 
     if (targetUrl) {
       const openButton = document.createElement("button");
       openButton.type = "button";
-      openButton.className = "send-to-chatgpt-toast__button";
+      openButton.className = "send-to-ollama-toast__button";
       openButton.textContent = "Open link";
       openButton.addEventListener("click", () => {
         chrome.runtime.sendMessage({
-          type: "send-to-chatgpt:open-link",
+          type: "send-to-ollama:open-link",
           url: targetUrl,
         });
         dismiss();
@@ -494,7 +441,7 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
     const dismissButton = document.createElement("button");
     dismissButton.type = "button";
     dismissButton.className =
-      "send-to-chatgpt-toast__button send-to-chatgpt-toast__button--tertiary";
+      "send-to-ollama-toast__button send-to-ollama-toast__button--tertiary";
     dismissButton.textContent = "Dismiss";
     dismissButton.addEventListener("click", () => {
       dismiss();
@@ -505,7 +452,7 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
     container.appendChild(toast);
 
     requestAnimationFrame(() => {
-      toast.classList.add("send-to-chatgpt-toast--visible");
+      toast.classList.add("send-to-ollama-toast--visible");
     });
 
     let autoRemoveTimer = window.setTimeout(() => {
@@ -524,37 +471,18 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
     toast.addEventListener("focusin", cancelAutoRemove);
 
     toast.addEventListener("mouseleave", () => {
-      if (autoRemoveTimer) {
-        return;
-      }
-      autoRemoveTimer = window.setTimeout(() => {
+      toast.classList.add("send-to-ollama-toast--leaving");
+      window.setTimeout(() => {
         dismiss();
-      }, displayDurationMs / 2);
+      }, fadeDurationMs);
     });
 
     toast.addEventListener("focusout", () => {
-      if (autoRemoveTimer) {
-        return;
-      }
-      autoRemoveTimer = window.setTimeout(() => {
-        dismiss();
-      }, displayDurationMs / 2);
-    });
-
-    function dismiss() {
-      if (toast.dataset.dismissed === "1") {
-        return;
-      }
-      toast.dataset.dismissed = "1";
-      cancelAutoRemove();
-      toast.classList.add("send-to-chatgpt-toast--leaving");
+      toast.classList.add("send-to-ollama-toast--leaving");
       window.setTimeout(() => {
-        toast.remove();
-        if (!container.children.length) {
-          container.remove();
-        }
+        dismiss();
       }, fadeDurationMs);
-    }
+    });
 
     function ensureContainer() {
       let element = document.getElementById(containerId);
@@ -594,7 +522,7 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
           z-index: 2147483647;
           pointer-events: none;
         }
-        .send-to-chatgpt-toast {
+        .send-to-ollama-toast {
           position: relative;
           min-width: 240px;
           max-width: min(360px, 90vw);
@@ -612,34 +540,34 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
           transition: opacity 0.18s ease-out, transform 0.18s ease-out;
           pointer-events: auto;
         }
-        .send-to-chatgpt-toast--visible {
+        .send-to-ollama-toast--visible {
           opacity: 1;
           transform: translateY(0);
         }
-        .send-to-chatgpt-toast--leaving {
+        .send-to-ollama-toast--leaving {
           opacity: 0;
           transform: translateY(-6px);
         }
-        .send-to-chatgpt-toast--error {
+        .send-to-ollama-toast--error {
           background: #4b1d1d;
           border-color: rgba(252, 165, 165, 0.6);
         }
-        .send-to-chatgpt-toast__title {
+        .send-to-ollama-toast__title {
           margin: 0 0 6px 0;
           font-weight: 600;
         }
-        .send-to-chatgpt-toast__message {
+        .send-to-ollama-toast__message {
           margin: 0;
           white-space: pre-wrap;
           word-break: break-word;
         }
-        .send-to-chatgpt-toast__actions {
+        .send-to-ollama-toast__actions {
           margin-top: 14px;
           display: flex;
           flex-wrap: wrap;
           gap: 8px;
         }
-        .send-to-chatgpt-toast__button {
+        .send-to-ollama-toast__button {
           cursor: pointer;
           border-radius: 6px;
           border: none;
@@ -649,16 +577,16 @@ function injectToastIntoPage({ title, message, isError, targetUrl }) {
           background: #2563eb;
           color: #ffffff;
         }
-        .send-to-chatgpt-toast__button:focus {
+        .send-to-ollama-toast__button:focus {
           outline: 2px solid rgba(37, 99, 235, 0.35);
           outline-offset: 2px;
         }
-        .send-to-chatgpt-toast__button--tertiary {
+        .send-to-ollama-toast__button--tertiary {
           background: transparent;
           color: inherit;
           border: 1px solid rgba(255, 255, 255, 0.2);
         }
-        .send-to-chatgpt-toast__button--tertiary:focus {
+        .send-to-ollama-toast__button--tertiary:focus {
           outline: 2px solid rgba(148, 163, 184, 0.4);
           outline-offset: 2px;
         }
@@ -676,11 +604,7 @@ function openUrlInNewTab(url) {
 
 function createNotificationId() {
   if (globalThis.crypto?.randomUUID) {
-    return `send-to-chatgpt-${globalThis.crypto.randomUUID()}`;
+    return `send-to-ollama-${globalThis.crypto.randomUUID()}`;
   }
-  return `send-to-chatgpt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return `send-to-ollama-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }

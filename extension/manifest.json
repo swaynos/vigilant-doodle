@@ -1,17 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Send to ChatGPT (Assistants API)",
+  "name": "Send to Ollama",
   "version": "0.1.0",
-  "description": "Send selected text and page metadata to an OpenAI Assistant from the context menu.",
+  "description": "Send selected text and page metadata to a local Ollama model from the context menu.",
   "permissions": [
     "contextMenus",
     "notifications",
     "activeTab",
     "scripting"
   ],
-  "host_permissions": [
-    "https://api.openai.com/*"
-  ],
+  "host_permissions": ["http://127.0.0.1:11434/*", "http://callisto.local:11434/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
